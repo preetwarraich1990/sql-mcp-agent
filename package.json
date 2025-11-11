@@ -1,14 +1,17 @@
 {
   "name": "sql-mcp-agent",
   "version": "1.0.0",
-  "main": "index.js",
+  "type": "module",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": ["sql", "ai", "mcp", "database"],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "AI-powered SQL agent using Model Context Protocol",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.1",
     "cors": "^2.8.5",

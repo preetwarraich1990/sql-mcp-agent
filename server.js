@@ -25,120 +25,88 @@ const mcp = new Server({ name: "SQL Agent", version: "1.0.0" });
 // TOOLS DEFINITION
 // ============================================
 
-const fetchDataTool = {
-  name: "fetchData",
-  description: "Fetch users from the User table with optional limit",
-  parameters: { limit: "number?" },
-  execute: async ({ limit = 10 }) => {
-    // Convert limit to a number, handle 'all' or non-numeric values
-    let limitValue = 10;
-    if (limit !== undefined && limit !== null && limit !== "all") {
-      limitValue = parseInt(limit, 10);
-      if (isNaN(limitValue)) {
-        limitValue = 10; // Default to 10 if conversion fails
+
+
+const executeCustomSQLTool = {
+  name: "executeCustomSQL",
+  description: "Execute a custom SQL query (SELECT, INSERT, UPDATE, DELETE) based on natural language request",
+  parameters: { 
+    queries: "array", // Array of {query, parameters, operation} objects
+    isBulk: "boolean?"
+  },
+  execute: async ({ queries, isBulk = false }) => {
+    try {
+      if (!Array.isArray(queries)) {
+        return { success: false, error: "Queries must be an array" };
       }
-    } else if (limit === "all") {
-      // For 'all', use a very large number
-      limitValue = 999999;
+
+      const results = [];
+      
+      // Execute queries in sequence (or use transaction for bulk operations)
+      if (isBulk && queries.length > 1) {
+        // Use transaction for bulk operations
+        const connection = await pool.getConnection();
+        try {
+          await connection.beginTransaction();
+          
+          for (const queryObj of queries) {
+            const { query, parameters = [], operation } = queryObj;
+            
+            // Validate each query
+            const validationResult = validateQuery(query, operation);
+            if (!validationResult.valid) {
+              await connection.rollback();
+              return { success: false, error: validationResult.error };
+            }
+            
+            const [result] = await connection.query(query, parameters);
+            results.push(formatQueryResult(result, operation));
+          }
+          
+          await connection.commit();
+          return { 
+            success: true, 
+            results, 
+            totalQueries: queries.length,
+            isBulk: true 
+          };
+        } catch (error) {
+          await connection.rollback();
+          throw error;
+        } finally {
+          connection.release();
+        }
+      } else {
+        // Execute single query or multiple queries without transaction
+        for (const queryObj of queries) {
+          const { query, parameters = [], operation } = queryObj;
+          
+          // Validate query
+          const validationResult = validateQuery(query, operation);
+          if (!validationResult.valid) {
+            return { success: false, error: validationResult.error };
+          }
+          
+          const [result] = await pool.query(query, parameters);
+          results.push(formatQueryResult(result, operation));
+        }
+        
+        return { 
+          success: true, 
+          results: queries.length === 1 ? results[0] : results,
+          totalQueries: queries.length,
+          isBulk: false 
+        };
+      }
+    } catch (error) {
+      return { success: false, error: error.message };
     }
-    
-    const [rows] = await pool.query(
-      "SELECT id, email, password, createdAt, updatedAt FROM User LIMIT ?",
-      [limitValue]
-    );
-    return rows;
-  },
-};
-
-const createUserTool = {
-  name: "createUser",
-  description: "Create a new User record",
-  parameters: {
-    email: "string",
-    password: "string",
-    createdAt: "string?",
-    updatedAt: "string?",
-  },
-  execute: async ({ email, password, createdAt, updatedAt }) => {
-    const formatDate = (date) => {
-      const d = new Date(date);
-      return d.toISOString().slice(0, 23).replace("T", " ").replace("Z", "");
-    };
-
-    const now = new Date();
-    const [result] = await pool.query(
-      "INSERT INTO User (email, password, createdAt, updatedAt) VALUES (?, ?, ?, ?)",
-      [
-        email,
-        password,
-        createdAt ? formatDate(createdAt) : formatDate(now),
-        updatedAt ? formatDate(updatedAt) : formatDate(now),
-      ]
-    );
-    return { success: true, id: result.insertId };
-  },
-};
-
-const updateDataTool = {
-  name: "updateData",
-  description: "Update a User record by email",
-  parameters: {
-    email: "string",
-    password: "string?",
-    createdAt: "string?",
-    updatedAt: "string?",
-  },
-  execute: async ({ email, password, createdAt, updatedAt }) => {
-    const fields = { password, createdAt, updatedAt };
-    const updates = Object.entries(fields)
-      .filter(([_, v]) => v !== undefined)
-      .map(([k]) => `\`${k}\`=?`);
-
-    if (updates.length === 0) {
-      return { success: false, error: "No fields to update" };
-    }
-
-    const values = Object.entries(fields)
-      .filter(([_, v]) => v !== undefined)
-      .map(([_, v]) => v);
-
-    await pool.query(`UPDATE User SET ${updates.join(", ")} WHERE email=?`, [
-      ...values,
-      email,
-    ]);
-    return { success: true };
-  },
-};
-
-const deleteDataTool = {
-  name: "deleteData",
-  description: "Delete a User record by email",
-  parameters: { email: "string" },
-  execute: async ({ email }) => {
-    await pool.query("DELETE FROM User WHERE email=?", [email]);
-    return { success: true };
-  },
-};
-
-const getUserByEmailTool = {
-  name: "getUserByEmail",
-  description: "Get a specific user by email address",
-  parameters: { email: "string" },
-  execute: async ({ email }) => {
-    const [rows] = await pool.query(
-      "SELECT id, email, password, createdAt, updatedAt FROM User WHERE email=?",
-      [email]
-    );
-    if (rows.length === 0) {
-      return { success: false, error: "User not found" };
-    }
-    return rows[0];
   },
 };
 
 // Register tools
 mcp.registerCapabilities({ tools: true });
-mcp.tools = [fetchDataTool, createUserTool, updateDataTool, deleteDataTool, getUserByEmailTool];
+mcp.tools = [executeCustomSQLTool];
 
 // ============================================
 // HELPER FUNCTIONS
@@ -172,6 +140,146 @@ function formatSchemaForPrompt(schema) {
     .join("\n");
 }
 
+function validateQuery(query, operation) {
+  // Basic SQL injection protection - ensure query starts with expected operation
+  const normalizedQuery = query.trim().toUpperCase();
+  const normalizedOperation = operation.toUpperCase();
+  
+  if (!normalizedQuery.startsWith(normalizedOperation)) {
+    return { valid: false, error: `Query does not match expected operation: ${operation}` };
+  }
+
+  // Additional safety checks
+  const dangerousPatterns = [
+    /DROP\s+TABLE/i,
+    /DROP\s+DATABASE/i,
+    /TRUNCATE/i,
+    /ALTER\s+TABLE/i,
+    /CREATE\s+TABLE/i,
+    /DELETE\s+FROM.*WHERE\s*1\s*=\s*1/i, // Prevent delete all
+    /UPDATE.*SET.*WHERE\s*1\s*=\s*1/i    // Prevent update all
+  ];
+
+  for (const pattern of dangerousPatterns) {
+    if (pattern.test(query)) {
+      return { valid: false, error: "Query contains potentially dangerous operations" };
+    }
+  }
+
+  return { valid: true };
+}
+
+function formatQueryResult(result, operation) {
+  const normalizedOperation = operation.toUpperCase();
+  
+  if (normalizedOperation === "SELECT") {
+    return { data: result, count: result.length, operation };
+  } else if (normalizedOperation === "INSERT") {
+    return { insertId: result.insertId, affectedRows: result.affectedRows, operation };
+  } else if (normalizedOperation === "UPDATE" || normalizedOperation === "DELETE") {
+    return { affectedRows: result.affectedRows, operation };
+  }
+  
+  return { result, operation };
+}
+
+
+
+async function generateSQLQuery(userMessage, schema) {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-3.5-turbo",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `
+You are an expert SQL query generator. Based on the user's natural language request and database schema, generate appropriate SQL queries.
+
+Database schema:
+${formatSchemaForPrompt(schema)}
+
+Generate a JSON response with:
+{
+  "queries": [
+    {
+      "query": "the SQL query with ? placeholders",
+      "parameters": ["value1", "value2"],
+      "operation": "SELECT|INSERT|UPDATE|DELETE"
+    }
+  ],
+  "explanation": "brief explanation of what the query does",
+  "isBulk": false
+}
+
+For multiple operations, set isBulk to true and provide an array of queries.
+
+Rules:
+- Always use parameterized queries with ? placeholders for user input
+- For INSERT queries, include all required fields and extract values from user message
+- For UPDATE/DELETE, always include a WHERE clause to prevent mass operations
+- Use proper SQL syntax for MySQL
+- Be precise with column names and table names from the schema
+- Extract actual parameter values from the user's message (emails, names, IDs, etc.)
+- For datetime fields, use MySQL datetime format: 'YYYY-MM-DD HH:MM:SS'
+- If user doesn't provide required values, use reasonable defaults or ask for clarification
+
+Examples:
+User: "Create user with email john@example.com and password 123456"
+Response: {
+  "queries": [
+    {
+      "query": "INSERT INTO User (email, password, createdAt, updatedAt) VALUES (?, ?, NOW(), NOW())",
+      "parameters": ["john@example.com", "123456"],
+      "operation": "INSERT"
+    }
+  ],
+  "explanation": "Creates a new user with the specified email and password",
+  "isBulk": false
+}
+
+User: "Create two users with email abc@gmail.com and cbd@gmail.co.in"
+Response: {
+  "queries": [
+    {
+      "query": "INSERT INTO User (email, password, createdAt, updatedAt) VALUES (?, ?, NOW(), NOW())",
+      "parameters": ["abc@gmail.com", "defaultpassword123"],
+      "operation": "INSERT"
+    },
+    {
+      "query": "INSERT INTO User (email, password, createdAt, updatedAt) VALUES (?, ?, NOW(), NOW())",
+      "parameters": ["cbd@gmail.co.in", "defaultpassword123"],
+      "operation": "INSERT"
+    }
+  ],
+  "explanation": "Creates two new users with the specified email addresses",
+  "isBulk": true
+}
+
+User: "Find all users created after 2023-01-01"
+Response: {
+  "queries": [
+    {
+      "query": "SELECT * FROM User WHERE createdAt > ?",
+      "parameters": ["2023-01-01 00:00:00"],
+      "operation": "SELECT"
+    }
+  ],
+  "explanation": "Retrieves all users created after January 1, 2023",
+  "isBulk": false
+}
+        `,
+      },
+      { role: "user", content: userMessage },
+    ],
+  });
+
+  try {
+    return JSON.parse(completion.choices[0].message.content);
+  } catch (e) {
+    throw new Error("Failed to generate SQL query: " + e.message);
+  }
+}
+
 // ============================================
 // API ENDPOINTS
 // ============================================
@@ -184,42 +292,23 @@ app.post("/api/agent", async (req, res) => {
     const schema = await getDatabaseSchema();
     const schemaDescription = formatSchemaForPrompt(schema);
 
-    // Send user message to OpenAI
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `
-You are an AI SQL agent connected to a MySQL database named "users".
-
-You can ONLY use these tools:
-1. fetchData(limit) - Get all users with optional limit
-2. getUserByEmail(email) - Get a specific user by email address
-3. createUser(email, password, createdAt, updatedAt) - Create a new user
-4. updateData(email, password, createdAt, updatedAt) - Update user by email (email is required)
-5. deleteData(email) - Delete a user by email
-
-Database schema:
-${schemaDescription}
-
-When a user asks something, respond **only** with valid JSON:
-{
-  "tool": "<toolName>",
-  "parameters": { "param1": "value", "param2": "value" }
-}
-
-IMPORTANT: 
-- For updateData, always include email to identify the user
-- Do not send null values, only changed fields
-- Do not include "id" in any parameters
-- No explanations, only JSON response
-          `,
-        },
-        { role: "user", content: message },
-      ],
-    });
+    // Generate custom SQL query for all requests
+    const sqlGeneration = await generateSQLQuery(message, schema);
+    
+    const completion = {
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            tool: "executeCustomSQL",
+            parameters: {
+              queries: sqlGeneration.queries,
+              isBulk: sqlGeneration.isBulk || false
+            },
+            explanation: sqlGeneration.explanation
+          })
+        }
+      }]
+    };
 
     // Parse OpenAI response
     const aiResponse = completion.choices[0].message.content;
@@ -240,6 +329,11 @@ IMPORTANT:
       Object.entries(parameters || {}).filter(([_, v]) => v !== null && v !== undefined)
     );
 
+    // Special handling for executeCustomSQL to ensure queries array is properly formatted
+    if (toolName === "executeCustomSQL" && cleanParameters.queries && !Array.isArray(cleanParameters.queries)) {
+      cleanParameters.queries = [];
+    }
+
     // Find and execute tool
     const tool = mcp.tools.find((t) => t.name === toolName);
     if (!tool) {
@@ -255,10 +349,30 @@ IMPORTANT:
       schema: schemaDescription,
       aiCommand: parsed,
       toolResult,
+      explanation: parsed.explanation || null,
     });
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("Error in /api/agent:", err);
+    
+    // Provide more specific error messages
+    if (err.message.includes("Failed to generate SQL query")) {
+      res.status(400).json({ 
+        error: "SQL generation failed", 
+        details: err.message,
+        suggestion: "Try rephrasing your request with more specific details"
+      });
+    } else if (err.message.includes("Unknown tool")) {
+      res.status(400).json({ 
+        error: "Tool not found", 
+        details: err.message,
+        availableTools: mcp.tools.map(t => t.name)
+      });
+    } else {
+      res.status(500).json({ 
+        error: "Internal server error", 
+        details: err.message 
+      });
+    }
   }
 });
 
@@ -268,5 +382,4 @@ IMPORTANT:
 
 app.listen(4000, () => {
   console.log("✅ SQL Agent API running on http://localhost:4000");
-  console.log("📝 POST /api/agent - Send SQL queries via AI agent");
 });
