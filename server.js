@@ -30,9 +30,21 @@ const fetchDataTool = {
   description: "Fetch users from the User table with optional limit",
   parameters: { limit: "number?" },
   execute: async ({ limit = 10 }) => {
+    // Convert limit to a number, handle 'all' or non-numeric values
+    let limitValue = 10;
+    if (limit !== undefined && limit !== null && limit !== "all") {
+      limitValue = parseInt(limit, 10);
+      if (isNaN(limitValue)) {
+        limitValue = 10; // Default to 10 if conversion fails
+      }
+    } else if (limit === "all") {
+      // For 'all', use a very large number
+      limitValue = 999999;
+    }
+    
     const [rows] = await pool.query(
       "SELECT id, email, password, createdAt, updatedAt FROM User LIMIT ?",
-      [limit]
+      [limitValue]
     );
     return rows;
   },
@@ -108,9 +120,25 @@ const deleteDataTool = {
   },
 };
 
+const getUserByEmailTool = {
+  name: "getUserByEmail",
+  description: "Get a specific user by email address",
+  parameters: { email: "string" },
+  execute: async ({ email }) => {
+    const [rows] = await pool.query(
+      "SELECT id, email, password, createdAt, updatedAt FROM User WHERE email=?",
+      [email]
+    );
+    if (rows.length === 0) {
+      return { success: false, error: "User not found" };
+    }
+    return rows[0];
+  },
+};
+
 // Register tools
 mcp.registerCapabilities({ tools: true });
-mcp.tools = [fetchDataTool, createUserTool, updateDataTool, deleteDataTool];
+mcp.tools = [fetchDataTool, createUserTool, updateDataTool, deleteDataTool, getUserByEmailTool];
 
 // ============================================
 // HELPER FUNCTIONS
@@ -168,9 +196,10 @@ You are an AI SQL agent connected to a MySQL database named "users".
 
 You can ONLY use these tools:
 1. fetchData(limit) - Get all users with optional limit
-2. createUser(email, password, createdAt, updatedAt) - Create a new user
-3. updateData(email, password, createdAt, updatedAt) - Update user by email (email is required)
-4. deleteData(email) - Delete a user by email
+2. getUserByEmail(email) - Get a specific user by email address
+3. createUser(email, password, createdAt, updatedAt) - Create a new user
+4. updateData(email, password, createdAt, updatedAt) - Update user by email (email is required)
+5. deleteData(email) - Delete a user by email
 
 Database schema:
 ${schemaDescription}

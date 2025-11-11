@@ -20,6 +20,7 @@ An AI-powered SQL agent that connects to a MySQL database and allows natural lan
 
 1. **Clone the repository**
    ```bash
+   git clone https://github.com/preetwarraich1990/sql-mcp-agent.git
    cd sql-mcp-agent
    ```
 
@@ -163,7 +164,18 @@ Update an existing user's information by email.
 - `createdAt` (optional, string): New creation timestamp
 - `updatedAt` (optional, string): New update timestamp
 
-### 4. **deleteData**
+### 4. **getUserByEmail**
+Retrieve a specific user by their email address.
+
+**Example Queries:**
+- "Get user john@example.com"
+- "Show me the user with email test@example.com"
+- "Fetch user details for admin@example.com"
+
+**Parameters:**
+- `email` (required, string): User's email address to retrieve
+
+### 5. **deleteData**
 Delete a user from the database.
 
 **Example Queries:**
@@ -271,6 +283,7 @@ For issues or questions:
 1. Check the Troubleshooting section above
 2. Review OpenAI API documentation
 3. Check MySQL and Node.js documentation
+4. Visit the [GitHub repository](https://github.com/preetwarraich1990/sql-mcp-agent)
 
 ---
 
